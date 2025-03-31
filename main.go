@@ -1,7 +1,7 @@
 package main
 
-import "github.com/demianrey/bs-go/cmd"
+import "github.com/demianrey/Bugdetect/cmd"
 
 func main() {
-	cmd.Execute()
+    cmd.Execute()
 }
