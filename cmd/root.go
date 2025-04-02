@@ -17,6 +17,7 @@ var (
 	flagInterface string
 	flagTimeout   int
 	flagDuration  int
+	flagSNI       bool
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -46,6 +47,7 @@ func init() {
 	rootCmd.Flags().IntVar(&flagTimeout, "timeout", 5, "connection timeout in seconds")
 	rootCmd.Flags().IntVar(&flagDuration, "duration", 0, "duration to run detector in minutes (0 for indefinite)")
 	rootCmd.Flags().BoolP("version", "v", false, "Print the version number of Bugdetect")
+	rootCmd.Flags().BoolVar(&flagSNI, "sni", false, "Enable SNI vulnerability detection")
 
 	rootCmd.MarkFlagRequired("output")
 }
@@ -54,6 +56,12 @@ func runDetect(cmd *cobra.Command, args []string) {
 	// Check if running as root
 	if os.Geteuid() != 0 {
 		fmt.Println("This command requires root privileges. Please run with sudo.")
+		os.Exit(1)
+	}
+
+	// Check if at least one detection mode is enabled
+	if !flagSNI {
+		fmt.Println("Error: At least one detection mode must be enabled (--sni)")
 		os.Exit(1)
 	}
 
@@ -77,14 +85,21 @@ func runDetect(cmd *cobra.Command, args []string) {
 		<-signalChan
 		fmt.Println("\nReceived interrupt signal. Shutting down...")
 		cancel()
+		
+		// Add a second signal handler for force exit
+		forceSignal := make(chan os.Signal, 1)
+		signal.Notify(forceSignal, syscall.SIGINT, syscall.SIGTERM)
+		
+		// If user presses Ctrl+C again, force exit
+		select {
+		case <-forceSignal:
+			fmt.Println("Force exiting...")
+			os.Exit(0)
+		case <-time.After(5 * time.Second):
+			fmt.Println("Shutdown taking too long, force exiting...")
+			os.Exit(0)
+		}
 	}()
-
-	// Configure the detector
-	config := snidetector.Config{
-		Interface:  flagInterface,
-		OutputFile: outputFile,
-		Timeout:    time.Duration(flagTimeout) * time.Second,
-	}
 
 	// Set duration if specified
 	if flagDuration > 0 {
@@ -93,13 +108,23 @@ func runDetect(cmd *cobra.Command, args []string) {
 		ctx = durationCtx
 	}
 
-	// Start the detector
-	detector := snidetector.NewDetector(config)
-	fmt.Println("Starting SNI bug detection. Press Ctrl+C to stop.")
-	err = detector.Start(ctx)
-	if err != nil {
-		fmt.Printf("Error during detection: %s\n", err.Error())
-		os.Exit(1)
+	// Run SNI detection if enabled
+	if flagSNI {
+		// Configure the detector
+		config := snidetector.Config{
+			Interface:  flagInterface,
+			OutputFile: outputFile,
+			Timeout:    time.Duration(flagTimeout) * time.Second,
+		}
+
+		// Start the detector
+		detector := snidetector.NewDetector(config)
+		fmt.Println("Starting SNI bug detection. Press Ctrl+C to stop.")
+		err = detector.Start(ctx)
+		if err != nil {
+			fmt.Printf("Error during detection: %s\n", err.Error())
+			os.Exit(1)
+		}
 	}
 
 	fmt.Println("Detection completed. Results saved to", flagOutput)

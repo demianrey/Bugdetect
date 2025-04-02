@@ -55,8 +55,9 @@ func (d *Detector) Start(ctx context.Context) error {
 		interfaceName = iface
 	}
 
-	// Open the device for capturing
-	handle, err := pcap.OpenLive(interfaceName, 1600, true, pcap.BlockForever)
+	// Open the device for capturing with a reasonable timeout instead of BlockForever
+	// This allows the program to respond to cancellation more quickly
+	handle, err := pcap.OpenLive(interfaceName, 1600, true, 100*time.Millisecond)
 	if err != nil {
 		return fmt.Errorf("failed to open device %s: %w", interfaceName, err)
 	}
@@ -143,12 +144,21 @@ func (d *Detector) Start(ctx context.Context) error {
 
 // validateSNI checks if a domain has SNI vulnerabilities by connecting to 8.8.8.8:443
 func (d *Detector) validateSNI(domain string) {
-	// Connect directly to 8.8.8.8:443
-	conn, err := net.DialTimeout("tcp", "8.8.8.8:443", d.config.Timeout)
+	// Use a timeout context to ensure this function doesn't hang
+	ctx, cancel := context.WithTimeout(context.Background(), d.config.Timeout)
+	defer cancel()
+
+	// Connect directly to 8.8.8.8:443 with context
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", "8.8.8.8:443")
 	if err != nil {
-		// Retry up to 3 times if connection fails
+		// Retry up to 2 times if connection fails
 		for i := 0; i < 2; i++ {
-			conn, err = net.DialTimeout("tcp", "8.8.8.8:443", d.config.Timeout)
+			// Check if context is done before retrying
+			if ctx.Err() != nil {
+				return
+			}
+			conn, err = dialer.DialContext(ctx, "tcp", "8.8.8.8:443")
 			if err == nil {
 				break
 			}
