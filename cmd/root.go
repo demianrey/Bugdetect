@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/demianrey/Bugdetect/pkg/proxydetector"
 	"github.com/demianrey/Bugdetect/pkg/snidetector"
 )
 
@@ -18,6 +19,7 @@ var (
 	flagTimeout   int
 	flagDuration  int
 	flagSNI       bool
+	flagProxy     string
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -48,6 +50,7 @@ func init() {
 	rootCmd.Flags().IntVar(&flagDuration, "duration", 0, "duration to run detector in minutes (0 for indefinite)")
 	rootCmd.Flags().BoolP("version", "v", false, "Print the version number of Bugdetect")
 	rootCmd.Flags().BoolVar(&flagSNI, "sni", false, "Enable SNI vulnerability detection")
+	rootCmd.Flags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to use for proxy detection (format: http://domain:port)")
 
 	rootCmd.MarkFlagRequired("output")
 }
@@ -60,8 +63,8 @@ func runDetect(cmd *cobra.Command, args []string) {
 	}
 
 	// Check if at least one detection mode is enabled
-	if !flagSNI {
-		fmt.Println("Error: At least one detection mode must be enabled (--sni)")
+	if !flagSNI && flagProxy == "" {
+		fmt.Println("Error: At least one detection mode must be enabled (--sni or --proxy)")
 		os.Exit(1)
 	}
 
@@ -108,6 +111,12 @@ func runDetect(cmd *cobra.Command, args []string) {
 		ctx = durationCtx
 	}
 
+	// Only allow one type of detection to prevent device lockups
+	if flagSNI && flagProxy != "" {
+		fmt.Println("Error: Only one detection mode can be enabled at a time (--sni or --proxy)")
+		os.Exit(1)
+	}
+
 	// Run SNI detection if enabled
 	if flagSNI {
 		// Configure the detector
@@ -120,6 +129,31 @@ func runDetect(cmd *cobra.Command, args []string) {
 		// Start the detector
 		detector := snidetector.NewDetector(config)
 		fmt.Println("Starting SNI bug detection. Press Ctrl+C to stop.")
+		err = detector.Start(ctx)
+		if err != nil {
+			fmt.Printf("Error during detection: %s\n", err.Error())
+			os.Exit(1)
+		}
+	}
+
+	// Run Proxy detection if enabled
+	if flagProxy != "" {
+		// Configure the detector
+		config := proxydetector.Config{
+			Interface:  flagInterface,
+			OutputFile: outputFile,
+			Timeout:    time.Duration(flagTimeout) * time.Second,
+			ProxyURL:   flagProxy,
+		}
+
+		// Start the detector
+		detector, err := proxydetector.NewDetector(config)
+		if err != nil {
+			fmt.Printf("Error creating proxy detector: %s\n", err.Error())
+			os.Exit(1)
+		}
+		
+		fmt.Println("Starting Proxy bug detection. Press Ctrl+C to stop.")
 		err = detector.Start(ctx)
 		if err != nil {
 			fmt.Printf("Error during detection: %s\n", err.Error())

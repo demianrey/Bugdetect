@@ -109,7 +109,27 @@ func (d *Detector) Start(ctx context.Context) error {
 				return nil
 			}
 			
-			// Process the packet
+			// Process IPv4 layer to get destination IPs
+			ipLayer := packet.Layer(layers.LayerTypeIPv4)
+			if ipLayer != nil {
+				ip, _ := ipLayer.(*layers.IPv4)
+				ipStr := ip.DstIP.String()
+				
+				// Skip private IPs and loopback
+				if !isPrivateIP(net.ParseIP(ipStr)) && !isLoopbackIP(net.ParseIP(ipStr)) {
+					// Only check if we haven't seen this IP before
+					if _, exists := d.domains.LoadOrStore(ipStr, true); !exists {
+						select {
+						case workChan <- ipStr:
+							// IP sent for validation
+						default:
+							// Channel full, skip this IP
+						}
+					}
+				}
+			}
+			
+			// Process the packet for SNI
 			tcpLayer := packet.Layer(layers.LayerTypeTCP)
 			if tcpLayer == nil {
 				continue
@@ -142,8 +162,8 @@ func (d *Detector) Start(ctx context.Context) error {
 	}
 }
 
-// validateSNI checks if a domain has SNI vulnerabilities by connecting to 8.8.8.8:443
-func (d *Detector) validateSNI(domain string) {
+// validateSNI checks if a domain or IP has SNI vulnerabilities by connecting to 8.8.8.8:443
+func (d *Detector) validateSNI(target string) {
 	// Use a timeout context to ensure this function doesn't hang
 	ctx, cancel := context.WithTimeout(context.Background(), d.config.Timeout)
 	defer cancel()
@@ -173,7 +193,7 @@ func (d *Detector) validateSNI(domain string) {
 	
 	// Perform TLS handshake with SNI
 	tlsConn := tls.Client(conn, &tls.Config{
-		ServerName:         domain,
+		ServerName:         target,
 		InsecureSkipVerify: true,
 	})
 	defer tlsConn.Close()
@@ -200,8 +220,8 @@ func (d *Detector) validateSNI(domain string) {
 		if strings.Contains(cert.Subject.CommonName, "dns.google") || 
 		   hasDNSGoogleInSAN(cert) {
 			// This is a confirmed SNI bug - print and log it
-			d.green.Fprintf(os.Stdout, "%s\n", domain)
-			fmt.Fprintf(d.config.OutputFile, "%s\n", domain)
+			d.green.Fprintf(os.Stdout, "%s\n", target)
+			fmt.Fprintf(d.config.OutputFile, "%s\n", target)
 		}
 	}
 }
@@ -244,6 +264,75 @@ func findDefaultInterface() (string, error) {
 	}
 	
 	return "", fmt.Errorf("no suitable interface found")
+}
+
+// isPrivateIP checks if an IP address is private
+func isPrivateIP(ip net.IP) bool {
+	// Check if IP is nil
+	if ip == nil {
+		return false
+	}
+	
+	// Check against private IP ranges
+	privateRanges := []struct {
+		start net.IP
+		end   net.IP
+	}{
+		{net.ParseIP("10.0.0.0"), net.ParseIP("10.255.255.255")},
+		{net.ParseIP("172.16.0.0"), net.ParseIP("172.31.255.255")},
+		{net.ParseIP("192.168.0.0"), net.ParseIP("192.168.255.255")},
+	}
+
+	for _, r := range privateRanges {
+		if bytesCompare(ip, r.start) >= 0 && bytesCompare(ip, r.end) <= 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// bytesCompare compares two IP addresses
+func bytesCompare(a, b net.IP) int {
+	if len(a) == 16 && len(b) == 4 {
+		return bytesCompare(a.To4(), b)
+	}
+	if len(a) == 4 && len(b) == 16 {
+		return bytesCompare(a, b.To4())
+	}
+	if len(a) == 0 && len(b) > 0 {
+		return -1
+	}
+	if len(a) > 0 && len(b) == 0 {
+		return 1
+	}
+	if len(a) == 0 && len(b) == 0 {
+		return 0
+	}
+
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] < b[i] {
+			return -1
+		}
+		if a[i] > b[i] {
+			return 1
+		}
+	}
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	return 0
+}
+
+// isLoopbackIP checks if an IP address is loopback
+func isLoopbackIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 // isLoopback checks if an interface is a loopback interface
